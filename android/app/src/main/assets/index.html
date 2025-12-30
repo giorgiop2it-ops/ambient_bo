@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Qualità aria Bologna - Ultimi 7 giorni</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 24px;
+        background: #f4f6f9;
+        color: #1b1b1f;
+      }
+      header {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin-bottom: 16px;
+      }
+      h1 {
+        font-size: 1.6rem;
+        margin: 0;
+      }
+      .controls {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 12px;
+        align-items: end;
+        margin-bottom: 20px;
+      }
+      .control {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      select,
+      button {
+        padding: 10px 12px;
+        border-radius: 8px;
+        border: 1px solid #c4c7d0;
+        font-size: 1rem;
+      }
+      button {
+        background: #1246ff;
+        color: #fff;
+        cursor: pointer;
+        border: none;
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: default;
+      }
+      .card {
+        background: #fff;
+        border-radius: 16px;
+        padding: 18px;
+        box-shadow: 0 8px 20px rgba(14, 26, 44, 0.08);
+      }
+      .meta {
+        font-size: 0.9rem;
+        color: #4b5563;
+      }
+      .status {
+        margin-top: 12px;
+        font-size: 0.95rem;
+      }
+      canvas {
+        max-height: 360px;
+      }
+      @media (prefers-color-scheme: dark) {
+        body {
+          background: #0d1117;
+          color: #e6edf3;
+        }
+        .card {
+          background: #161b22;
+          box-shadow: none;
+        }
+        select,
+        button {
+          border-color: #30363d;
+        }
+        button {
+          background: #3b82f6;
+        }
+        .meta {
+          color: #9ca3af;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Centraline qualità aria - Bologna</h1>
+      <div class="meta">
+        Dati da Opendata Comune di Bologna · storico fino a 7 giorni
+      </div>
+    </header>
+    <section class="controls">
+      <div class="control">
+        <label for="agentSelect">Agente atmosferico</label>
+        <select id="agentSelect"></select>
+      </div>
+      <div class="control">
+        <label for="stationSelect">Centralina</label>
+        <select id="stationSelect"></select>
+      </div>
+      <div class="control">
+        <button id="refreshButton">Aggiorna dati</button>
+      </div>
+    </section>
+    <section class="card">
+      <canvas id="chart" aria-label="Grafico qualità aria" role="img"></canvas>
+      <div class="status" id="status"></div>
+    </section>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" crossorigin="anonymous"></script>
+    <script>
+      const API_BASE =
+        "https://opendata.comune.bologna.it/api/explore/v2.1/catalog/datasets/centraline-qualita-aria/records";
+      const agentSelect = document.getElementById("agentSelect");
+      const stationSelect = document.getElementById("stationSelect");
+      const statusEl = document.getElementById("status");
+      const refreshButton = document.getElementById("refreshButton");
+
+      let chartInstance = null;
+      let cachedRecords = [];
+
+      const fieldCandidates = {
+        date: ["data", "data_ora", "data_rilevazione", "data_ora_rilevazione"],
+        value: ["valore", "valore_misurato", "valore_medio"],
+        agent: ["agente_atm", "agente", "inquinante"],
+        station: ["centralina", "nome_centralina", "stazione"],
+      };
+
+      const getFieldValue = (record, candidates) => {
+        for (const key of candidates) {
+          if (record[key] !== undefined && record[key] !== null) {
+            return record[key];
+          }
+        }
+        return null;
+      };
+
+      const formatDate = (date) => date.toISOString().split("T")[0];
+
+      const getDateRange = () => {
+        const end = new Date();
+        end.setHours(23, 59, 59, 999);
+        const start = new Date();
+        start.setDate(end.getDate() - 6);
+        start.setHours(0, 0, 0, 0);
+        return { start, end };
+      };
+
+      const buildUrl = (params) => {
+        const url = new URL(API_BASE);
+        Object.entries(params).forEach(([key, value]) => {
+          if (value !== undefined && value !== null && value !== "") {
+            url.searchParams.set(key, value);
+          }
+        });
+        return url.toString();
+      };
+
+      const updateStatus = (message) => {
+        statusEl.textContent = message;
+      };
+
+      const fetchRecords = async () => {
+        updateStatus("Caricamento dati...");
+        refreshButton.disabled = true;
+        const { start } = getDateRange();
+        const where = `data >= date'${formatDate(start)}'`;
+        const url = buildUrl({ limit: "100", where, order_by: "data" });
+
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`Errore API: ${response.status}`);
+        }
+        const payload = await response.json();
+        return payload.results || [];
+      };
+
+      const normalizeRecords = (records) => {
+        return records
+          .map((record) => {
+            const dateValue = getFieldValue(record, fieldCandidates.date);
+            const value = getFieldValue(record, fieldCandidates.value);
+            const agent = getFieldValue(record, fieldCandidates.agent) || "N/D";
+            const station = getFieldValue(record, fieldCandidates.station) || "N/D";
+
+            if (!dateValue || value === null || value === undefined) {
+              return null;
+            }
+
+            const date = new Date(dateValue);
+            if (Number.isNaN(date.getTime())) {
+              return null;
+            }
+
+            return {
+              date,
+              dateKey: formatDate(date),
+              value: Number(value),
+              agent,
+              station,
+            };
+          })
+          .filter(Boolean);
+      };
+
+      const fillSelectOptions = (select, values, fallback) => {
+        select.innerHTML = "";
+        if (!values.length) {
+          const option = document.createElement("option");
+          option.value = "";
+          option.textContent = fallback;
+          select.appendChild(option);
+          return;
+        }
+        values.forEach((value) => {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = value;
+          select.appendChild(option);
+        });
+      };
+
+      const getLast7DaysLabels = () => {
+        const { start } = getDateRange();
+        const labels = [];
+        for (let i = 0; i < 7; i += 1) {
+          const date = new Date(start);
+          date.setDate(start.getDate() + i);
+          labels.push(formatDate(date));
+        }
+        return labels;
+      };
+
+      const aggregateData = (records, agent, station) => {
+        const filtered = records.filter((record) => {
+          if (agent && record.agent !== agent) {
+            return false;
+          }
+          if (station && record.station !== station) {
+            return false;
+          }
+          return true;
+        });
+
+        const buckets = new Map();
+        filtered.forEach((record) => {
+          if (!buckets.has(record.dateKey)) {
+            buckets.set(record.dateKey, []);
+          }
+          buckets.get(record.dateKey).push(record.value);
+        });
+
+        const labels = getLast7DaysLabels();
+        const data = labels.map((label) => {
+          const values = buckets.get(label);
+          if (!values || !values.length) {
+            return null;
+          }
+          const sum = values.reduce((acc, val) => acc + val, 0);
+          return Number((sum / values.length).toFixed(2));
+        });
+
+        return { labels, data };
+      };
+
+      const renderChart = ({ labels, data }, agent, station) => {
+        const ctx = document.getElementById("chart");
+        const titleParts = [agent];
+        if (station) {
+          titleParts.push(`(${station})`);
+        }
+        const chartTitle = titleParts.join(" ");
+
+        if (chartInstance) {
+          chartInstance.destroy();
+        }
+
+        chartInstance = new Chart(ctx, {
+          type: "line",
+          data: {
+            labels,
+            datasets: [
+              {
+                label: chartTitle,
+                data,
+                borderColor: "#2563eb",
+                backgroundColor: "rgba(37, 99, 235, 0.15)",
+                spanGaps: true,
+                tension: 0.3,
+                fill: true,
+                pointRadius: 4,
+                pointHoverRadius: 6,
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            plugins: {
+              legend: {
+                display: true,
+              },
+              tooltip: {
+                callbacks: {
+                  label: (context) =>
+                    `${context.dataset.label}: ${context.formattedValue}`,
+                },
+              },
+            },
+            scales: {
+              y: {
+                title: {
+                  display: true,
+                  text: "Valore medio giornaliero",
+                },
+              },
+            },
+          },
+        });
+      };
+
+      const refreshData = async () => {
+        try {
+          cachedRecords = normalizeRecords(await fetchRecords());
+          if (!cachedRecords.length) {
+            updateStatus("Nessun dato disponibile per gli ultimi 7 giorni.");
+            return;
+          }
+
+          const agents = [...new Set(cachedRecords.map((r) => r.agent))].sort();
+          fillSelectOptions(agentSelect, agents, "Nessun agente");
+          const stations = [...new Set(cachedRecords.map((r) => r.station))].sort();
+          fillSelectOptions(stationSelect, ["Tutte", ...stations], "Tutte");
+
+          updateStatus(`Dati aggiornati alle ${new Date().toLocaleTimeString()}.`);
+          updateChart();
+        } catch (error) {
+          updateStatus(`Errore caricamento dati: ${error.message}`);
+        } finally {
+          refreshButton.disabled = false;
+        }
+      };
+
+      const updateChart = () => {
+        if (!cachedRecords.length) {
+          return;
+        }
+        const agent = agentSelect.value;
+        const station = stationSelect.value === "Tutte" ? "" : stationSelect.value;
+        const aggregated = aggregateData(cachedRecords, agent, station);
+        renderChart(aggregated, agent, station);
+      };
+
+      agentSelect.addEventListener("change", updateChart);
+      stationSelect.addEventListener("change", updateChart);
+      refreshButton.addEventListener("click", refreshData);
+
+      refreshData();
+    </script>
+  </body>
+</html>

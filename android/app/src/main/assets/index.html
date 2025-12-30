@@ -185,9 +185,7 @@
       const fetchRecords = async () => {
         updateStatus("Caricamento dati...");
         refreshButton.disabled = true;
-        const { start } = getDateRange();
-        const where = `data >= date'${formatDate(start)}'`;
-        const url = buildUrl({ limit: "100", where, order_by: "data" });
+        const url = buildUrl({ limit: "100" });
 
         const response = await fetch(url);
         if (!response.ok) {
